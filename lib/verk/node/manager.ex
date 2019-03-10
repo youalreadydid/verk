@@ -8,7 +8,7 @@ defmodule Verk.Node.Manager do
   alias Verk.InProgressQueue
 
   @doc false
-  def start_link, do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
+  def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
 
   @doc false
   def init(_) do

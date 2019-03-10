@@ -6,7 +6,7 @@ defmodule Verk.Queue.Supervisor do
   * A `Verk.WorkersManager`
   """
   use Supervisor
-  alias Verk.{WorkersManager, QueueManager}
+  alias Verk.{WorkersManager, QueueManager, QueueConsumer}
 
   @doc false
   def start_link(name, size) do
@@ -18,9 +18,11 @@ defmodule Verk.Queue.Supervisor do
     pool_name = String.to_atom("#{name}.pool")
     workers_manager = WorkersManager.name(name)
     queue_manager = QueueManager.name(name)
+    queue_consumer = QueueConsumer.name(name)
 
     children = [
       worker(QueueManager, [queue_manager, name], id: queue_manager),
+      worker(QueueConsumer, [queue_consumer, name], id: queue_consumer),
       poolboy_spec(pool_name, size),
       worker(
         WorkersManager,

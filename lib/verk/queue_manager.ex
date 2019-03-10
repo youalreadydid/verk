@@ -1,16 +1,13 @@
 defmodule Verk.QueueManager do
   @moduledoc """
-  QueueManager interacts with redis to dequeue jobs from the specified queue.
+  QueueManager handles consumption, acknowledgment and retry of a queue
   """
 
   use GenServer
   require Logger
-  alias Verk.{DeadSet, RetrySet, Time, Job, InProgressQueue}
+  alias Verk.{Queue, DeadSet, RetrySet, Time, Job, InProgressQueue}
 
   @default_stacktrace_size 5
-
-  @external_resource "priv/mrpop_lpush_src_dest.lua"
-  @mrpop_lpush_src_dest_script_sha Verk.Scripts.sha("mrpop_lpush_src_dest")
 
   @max_jobs 100
 
@@ -33,7 +30,7 @@ defmodule Verk.QueueManager do
   end
 
   @doc """
-  Pop a job from the assigned queue and reply with it if not empty
+  Pop jobs from the assigned queue and reply with it if not empty
   """
   def dequeue(queue_manager, n, timeout \\ 5000) do
     GenServer.call(queue_manager, {:dequeue, n}, timeout)
@@ -80,14 +77,9 @@ defmodule Verk.QueueManager do
     {:ok, redis} = Redix.start_link(Confex.get_env(:verk, :redis_url))
     Verk.Scripts.load(redis)
 
-    track_node_id = Application.get_env(:verk, :generate_node_id, false)
-
-    state = %State{
-      queue_name: queue_name,
-      redis: redis,
-      node_id: node_id,
-      track_node_id: track_node_id
-    }
+    state = %State{ queue_name: queue_name, redis: redis, node_id: node_id }
+ # Move this to an initializer process somewhere inside the verk supervisor
+    # Redix.command(redis, ["XGROUP", "CREATE", Queue.queue_name(queue_name), "verk", 0, "MKSTREAM"])
 
     Logger.info("Queue Manager started for queue #{queue_name}")
     {:ok, state}
@@ -95,61 +87,17 @@ defmodule Verk.QueueManager do
 
   @doc false
   def handle_call(:enqueue_inprogress, _from, state) do
-    case InProgressQueue.enqueue_in_progress(state.queue_name, state.node_id, state.redis) do
-      {:ok, [0, m]} ->
-        Logger.info("Added #{m} jobs.")
-
-        Logger.info(
-          "No more jobs to be added to the queue #{state.queue_name} from inprogress list."
-        )
-
         {:reply, :ok, state}
-
-      {:ok, [n, m]} ->
-        Logger.info("Added #{m} jobs.")
-
-        Logger.info(
-          "#{n} jobs still to be added to the queue #{state.queue_name} from inprogress list."
-        )
-
-        {:reply, :more, state}
-
-      {:error, reason} ->
-        Logger.error(
-          "Failed to add jobs back to queue #{state.queue_name} from inprogress. Error: #{
-            inspect(reason)
-          }"
-        )
-
-        {:stop, :redis_failed, state}
-    end
   end
 
-  def handle_call({:dequeue, n}, _from, state = %State{track_node_id: false}) do
-    case Redix.command(state.redis, mrpop_lpush_src_dest(state.node_id, state.queue_name, n)) do
-      {:ok, jobs} ->
+  def handle_call({:dequeue, n}, _from, state) do
+    commands = ["XREADGROUP", "GROUP", "verk", state.node_id, "COUNT", n, "STREAMS", Queue.queue_name(state.queue_name), ">"]
+    case Redix.command(state.redis, commands) do
+      {:ok, [[_, jobs]]} ->
         {:reply, jobs, state}
 
-      {:error, %Redix.Error{message: message}} ->
-        Logger.error("Failed to fetch jobs: #{message}")
-        {:stop, :redis_failed, :redis_failed, state}
-
-      {:error, _} ->
-        {:reply, :redis_failed, state}
-    end
-  end
-
-  def handle_call({:dequeue, n}, _from, state = %State{track_node_id: true}) do
-    case Redix.pipeline(state.redis, [
-           ["MULTI"],
-           Verk.Node.add_node_redis_command(state.node_id),
-           Verk.Node.add_queue_redis_command(state.node_id, state.queue_name),
-           mrpop_lpush_src_dest(state.node_id, state.queue_name, n),
-           ["EXEC"]
-         ]) do
-      {:ok, response} ->
-        jobs = response |> List.last() |> List.last()
-        {:reply, jobs, state}
+      {:ok, nil} ->
+        {:reply, [], state}
 
       {:error, %Redix.Error{message: message}} ->
         Logger.error("Failed to fetch jobs: #{message}")
@@ -192,37 +140,23 @@ defmodule Verk.QueueManager do
   end
 
   @doc false
-  def handle_cast({:ack, job}, state) do
-    case Redix.command(state.redis, [
-           "LREM",
-           inprogress(state.queue_name, state.node_id),
-           "-1",
-           job.original_json
-         ]) do
+  def handle_cast({:ack, item_id}, state) do
+    case Queue.remove(state.queue_name, item_id) do
       {:ok, 1} -> :ok
-      _ -> Logger.error("Failed to acknowledge job #{inspect(job)}")
+      _ -> Logger.error("Failed to acknowledge job #{inspect(item_id)}")
     end
 
     {:noreply, state}
   end
 
   @doc false
-  def handle_cast({:malformed, job}, state) do
-    case Redix.command(state.redis, [
-           "LREM",
-           inprogress(state.queue_name, state.node_id),
-           "-1",
-           job
-         ]) do
+  def handle_cast({:malformed, item_id}, state) do
+    case Queue.remove(state.queue_name, item_id) do
       {:ok, 1} -> :ok
-      _ -> Logger.error("Failed to acknowledge job #{inspect(job)}")
+      _ -> Logger.error("Failed to remove malformed job #{inspect(item_id)}")
     end
 
     {:noreply, state}
-  end
-
-  defp inprogress(queue_name, node_id) do
-    "inprogress:#{queue_name}:#{node_id}"
   end
 
   defp format_stacktrace(stacktrace) when is_list(stacktrace) do
@@ -233,15 +167,4 @@ defmodule Verk.QueueManager do
   end
 
   defp format_stacktrace(stacktrace), do: inspect(stacktrace)
-
-  defp mrpop_lpush_src_dest(node_id, queue_name, n) do
-    [
-      "EVALSHA",
-      @mrpop_lpush_src_dest_script_sha,
-      2,
-      "queue:#{queue_name}",
-      inprogress(queue_name, node_id),
-      min(@max_jobs, n)
-    ]
-  end
 end

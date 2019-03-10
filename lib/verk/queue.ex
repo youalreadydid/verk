@@ -5,6 +5,20 @@ defmodule Verk.Queue do
   alias Verk.Job
   import Verk.Dsl
 
+  @doc false
+  def queue_name(queue) do
+    "verk:queue:#{queue}"
+  end
+
+  def enqueue(job, redis \\ Verk.Redis) do
+    encoded_job = Job.encode!(job)
+    Redix.command(redis, ["XADD", queue_name(job.queue), "*", "job", encoded_job])
+  end
+
+  def remove(queue, item_id, redis \\ Verk.Redis) do
+    Redix.command(redis, ["XDEL", queue_name(queue), item_id])
+  end
+
   @doc """
   Counts how many jobs are enqueued on a queue
   """
@@ -104,5 +118,4 @@ defmodule Verk.Queue do
     bangify(delete_job(queue, original_json))
   end
 
-  defp queue_name(queue), do: "queue:#{queue}"
 end
