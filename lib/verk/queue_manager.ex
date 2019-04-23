@@ -142,7 +142,7 @@ defmodule Verk.QueueManager do
   @doc false
   def handle_cast({:ack, item_id}, state) do
     case Queue.remove(state.queue_name, item_id) do
-      {:ok, 1} -> :ok
+      {:ok, [1, 1]} -> :ok
       _ -> Logger.error("Failed to acknowledge job #{inspect(item_id)}")
     end
 

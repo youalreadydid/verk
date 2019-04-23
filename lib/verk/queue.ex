@@ -16,15 +16,29 @@ defmodule Verk.Queue do
   end
 
   def remove(queue, item_id, redis \\ Verk.Redis) do
-    Redix.command(redis, ["XDEL", queue_name(queue), item_id])
+    Redix.pipeline(redis, [
+      ["XACK", queue_name(queue), "verk", item_id],
+      ["XDEL", queue_name(queue), item_id]
+    ])
+    |> IO.inspect()
   end
 
   @doc """
-  Counts how many jobs are enqueued on a queue
+  Counts how many jobs are enqueued
   """
   @spec count(binary) :: {:ok, integer} | {:error, atom | Redix.Error.t()}
   def count(queue) do
-    Redix.command(Verk.Redis, ["LLEN", queue_name(queue)])
+    commands = [
+      ["MULTI"],
+      ["XLEN", queue_name(queue)],
+      ["XPENDING", queue_name(queue), "verk"],
+      ["EXEC"]
+    ]
+
+    case Redix.pipeline(Verk.Redis, commands) do
+      {:ok, [_, _, _, [total, [pending | _]]]} -> {:ok, total - pending}
+      error -> error
+    end
   end
 
   @doc """
@@ -32,6 +46,25 @@ defmodule Verk.Queue do
   """
   @spec count!(binary) :: integer
   def count!(queue) do
+    bangify(count(queue))
+  end
+
+  @doc """
+  Counts how many jobs are pending to be ack'd
+  """
+  @spec pending(binary) :: {:ok, integer} | {:error, atom | Redix.Error.t()}
+  def pending(queue) do
+    case Redix.command(Verk.Redis, ["XPENDING", queue_name(queue), "verk"]) do
+      {:ok, [pending | _]} -> {:ok, pending}
+      error -> error
+    end
+  end
+
+  @doc """
+  Counts how many jobs are pending to be ack'd, raising if there's an error
+  """
+  @spec pending!(binary) :: integer
+  def pending!(queue) do
     bangify(count(queue))
   end
 
@@ -117,5 +150,4 @@ defmodule Verk.Queue do
   def delete_job!(queue, original_json) do
     bangify(delete_job(queue, original_json))
   end
-
 end

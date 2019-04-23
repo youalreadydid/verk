@@ -35,42 +35,64 @@ defmodule Verk.QueueConsumer do
     node_id = Confex.fetch_env!(:verk, :local_node_id)
     {:ok, redis} = Redix.start_link(Confex.get_env(:verk, :redis_url))
 
-    state = %State{ queue: queue, workers_manager_name: WorkersManager.name(queue),
-                    redis: redis, node_id: node_id, demand: 0 }
- # Move this to an initializer process somewhere inside the verk supervisor
-    # Redix.command(redis, ["XGROUP", "CREATE", Queue.queue_name(queue), "verk", 0, "MKSTREAM"])
+    state = %State{
+      queue: queue,
+      workers_manager_name: WorkersManager.name(queue),
+      redis: redis,
+      node_id: node_id,
+      demand: 0
+    }
+
+    ensure_group_exists!(queue, redis)
 
     Logger.info("Queue Consumer started for queue #{queue}")
     {:ok, state}
   end
 
+  defp ensure_group_exists!(queue, redis) do
+    # Move this to an initializer process somewhere inside the verk supervisor
+    Redix.command(redis, ["XGROUP", "CREATE", Queue.queue_name(queue), "verk", 0, "MKSTREAM"])
+  rescue
+      _ -> :ok
+  end
+
   def handle_cast({:ask, new_demand}, state) do
-    IO.puts "Demand received: #{new_demand}. Current demand: #{state.demand}"
-    send self(), :consume
-    {:noreply, %{state | demand: state.demand + new_demand }}
+    IO.puts("Demand received: #{new_demand}. Current demand: #{state.demand}")
+    if state.demand == 0, do: send(self(), :consume)
+    {:noreply, %{state | demand: state.demand + new_demand}}
   end
 
   # FIXME infinity?
   def handle_info(:consume, state) do
-    Logger.info "Consuming. Demand: #{state.demand}"
+    Logger.info("Consuming. Demand: #{state.demand}")
 
-    commands = ["XREADGROUP", "GROUP", "verk", state.node_id,
-                "COUNT", state.demand,
-                "BLOCK", 0,
-                "STREAMS", Queue.queue_name(state.queue), ">"]
+    commands = [
+      "XREADGROUP",
+      "GROUP",
+      "verk",
+      state.node_id,
+      "COUNT",
+      min(@max_jobs, state.demand),
+      "BLOCK",
+      0,
+      "STREAMS",
+      Queue.queue_name(state.queue),
+      ">"
+    ]
+
     case Redix.command(state.redis, commands, timeout: :infinity) do
       {:ok, [[_, jobs]]} ->
-        IO.puts "Items consumed"
+        IO.puts("Items consumed")
 
-
-        send state.workers_manager_name, {:jobs, jobs}
+        send(state.workers_manager_name, {:jobs, jobs})
 
         new_demand = state.demand - Enum.count(jobs)
         if new_demand > 0, do: send(self(), :consume)
         {:noreply, %{state | demand: new_demand}}
+
       result ->
-        IO.inspect result
-        IO.puts "Nothing consumed"
+        IO.inspect(result)
+        IO.puts("Nothing consumed")
         {:noreply, [], state}
     end
   end
