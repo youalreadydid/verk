@@ -8,10 +8,11 @@ defmodule Verk.QueueConsumer do
   alias Verk.{Queue, WorkersManager}
 
   @max_jobs 100
+  @max_timeout 30_000
 
   defmodule State do
     @moduledoc false
-    defstruct [:queue, :workers_manager_name, :redis, :node_id, :demand]
+    defstruct [:queue, :workers_manager_name, :redis, :node_id, :demand, :last_id]
   end
 
   @doc """
@@ -40,7 +41,8 @@ defmodule Verk.QueueConsumer do
       workers_manager_name: WorkersManager.name(queue),
       redis: redis,
       node_id: node_id,
-      demand: 0
+      demand: 0,
+      last_id: 0
     }
 
     ensure_group_exists!(queue, redis)
@@ -62,27 +64,15 @@ defmodule Verk.QueueConsumer do
     {:noreply, %{state | demand: state.demand + new_demand}}
   end
 
-  # FIXME infinity?
-  def handle_info(:consume, state) do
-    Logger.info("Consuming. Demand: #{state.demand}")
+  def handle_info(:consume, state = %State{last_id: ">"}) do
+    case consume(state) do
+      {:ok, nil} ->
+        send(self(), :consume)
+        {:noreply, state}
 
-    commands = [
-      "XREADGROUP",
-      "GROUP",
-      "verk",
-      state.node_id,
-      "COUNT",
-      min(@max_jobs, state.demand),
-      "BLOCK",
-      0,
-      "STREAMS",
-      Queue.queue_name(state.queue),
-      ">"
-    ]
-
-    case Redix.command(state.redis, commands, timeout: :infinity) do
-      {:ok, [[_, jobs]]} ->
-        IO.puts("Items consumed")
+      {:ok, jobs} ->
+        IO.inspect jobs
+        IO.puts("Items consumed. Size: #{length(jobs)}")
 
         send(state.workers_manager_name, {:jobs, jobs})
 
@@ -93,7 +83,59 @@ defmodule Verk.QueueConsumer do
       result ->
         IO.inspect(result)
         IO.puts("Nothing consumed")
+        send(self(), :consume)
         {:noreply, [], state}
+    end
+  end
+
+  def handle_info(:consume, state) do
+    case consume(state) do
+      {:ok, nil} ->
+        send(self(), :consume)
+        {:noreply, state}
+
+      {:ok, []} ->
+        send(self(), :consume)
+        {:noreply, %{state | last_id: ">"}}
+
+      {:ok, jobs} ->
+        IO.puts("Items consumed. Size: #{length(jobs)}")
+
+        send(state.workers_manager_name, {:jobs, jobs})
+
+        [last_id, _] = List.last(jobs)
+
+        new_demand = state.demand - Enum.count(jobs)
+        if new_demand > 0, do: send(self(), :consume)
+        {:noreply, %{state | last_id: last_id, demand: new_demand}}
+
+      result ->
+        IO.puts("Nothing consumed. Result: #{inspect(result)}")
+        send(self(), :consume)
+        {:noreply, [], state}
+    end
+  end
+
+  defp consume(state) do
+    Logger.info("Consuming. Demand: #{state.demand}. Last id: #{state.last_id}")
+
+    commands = [
+      "XREADGROUP",
+      "GROUP",
+      "verk",
+      state.node_id,
+      "COUNT",
+      min(@max_jobs, state.demand),
+      "BLOCK",
+      @max_timeout,
+      "STREAMS",
+      Queue.queue_name(state.queue),
+      state.last_id
+    ]
+
+    case Redix.command(state.redis, commands, timeout: @max_timeout + 5000) do
+      {:ok, [[_, jobs]]} -> {:ok, jobs}
+      result -> result |> IO.inspect
     end
   end
 end

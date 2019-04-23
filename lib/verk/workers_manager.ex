@@ -100,6 +100,7 @@ defmodule Verk.WorkersManager do
     status = Verk.Manager.status(queue_name)
 
     consumer_name = QueueConsumer.name(queue_name)
+    {:ok, _pid} = QueueConsumer.start_link(consumer_name, queue_name)
 
     state = %State{
       queue_name: queue_name,
