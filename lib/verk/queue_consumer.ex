@@ -52,7 +52,6 @@ defmodule Verk.QueueConsumer do
   end
 
   defp ensure_group_exists!(queue, redis) do
-    # Move this to an initializer process somewhere inside the verk supervisor
     Redix.command(redis, ["XGROUP", "CREATE", Queue.queue_name(queue), "verk", 0, "MKSTREAM"])
   rescue
       _ -> :ok
@@ -71,7 +70,6 @@ defmodule Verk.QueueConsumer do
         {:noreply, state}
 
       {:ok, jobs} ->
-        IO.inspect jobs
         IO.puts("Items consumed. Size: #{length(jobs)}")
 
         send(state.workers_manager_name, {:jobs, jobs})

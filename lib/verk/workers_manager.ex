@@ -143,9 +143,9 @@ defmodule Verk.WorkersManager do
 
   def handle_info({:jobs, jobs}, state) do
     Enum.each(jobs, fn [item_id, ["job", job]] ->
-      case job |> Job.decode() do
+      case job |> Job.decode(item_id) do
         {:ok, verk_job} ->
-          start_job(verk_job, item_id, state)
+          start_job(verk_job, state)
 
         {:error, error} ->
           Logger.error(
@@ -166,8 +166,8 @@ defmodule Verk.WorkersManager do
   #   * reason - The worker crashed and it doesn't have have a stacktrace
   def handle_info({:DOWN, mref, _, worker, :normal}, state) do
     case :ets.lookup(state.monitors, worker) do
-      [{^worker, _job_id, job, ^mref, start_time, item_id}] ->
-        succeed(job, item_id, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
+      [{^worker, _job_id, job, ^mref, start_time}] ->
+        succeed(job, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
 
       _ ->
         Logger.warn("Worker finished but such worker was not monitored #{inspect(worker)}")
@@ -196,12 +196,11 @@ defmodule Verk.WorkersManager do
     :ok = :poolboy.checkin(state.pool_name, worker)
 
     case :ets.lookup(state.monitors, worker) do
-      [{^worker, _job_id, job, ^mref, start_time, item_id}] ->
+      [{^worker, _job_id, job, ^mref, start_time}] ->
         exception = RuntimeError.exception(inspect(reason))
 
         fail(
           job,
-          item_id,
           start_time,
           worker,
           mref,
@@ -222,8 +221,8 @@ defmodule Verk.WorkersManager do
     :ok = :poolboy.checkin(state.pool_name, worker)
 
     case :ets.lookup(state.monitors, worker) do
-      [{^worker, ^job_id, job, mref, start_time, item_id}] ->
-        succeed(job, item_id, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
+      [{^worker, ^job_id, job, mref, start_time}] ->
+        succeed(job, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
 
       _ ->
         Logger.warn("#{job_id} finished but no worker was monitored")
@@ -237,10 +236,9 @@ defmodule Verk.WorkersManager do
     :ok = :poolboy.checkin(state.pool_name, worker)
 
     case :ets.lookup(state.monitors, worker) do
-      [{^worker, ^job_id, job, mref, start_time, item_id}] ->
+      [{^worker, ^job_id, job, mref, start_time}] ->
         fail(
           job,
-          item_id,
           start_time,
           worker,
           mref,
@@ -258,8 +256,8 @@ defmodule Verk.WorkersManager do
     {:noreply, state}
   end
 
-  defp succeed(job, item_id, start_time, worker, mref, monitors, queue_manager_name, consumer_name) do
-    QueueManager.ack(queue_manager_name, item_id)
+  defp succeed(job, start_time, worker, mref, monitors, queue_manager_name, consumer_name) do
+    QueueManager.ack(queue_manager_name, job.item_id)
     QueueConsumer.ask(consumer_name, 1)
     Log.done(job, start_time, worker)
     demonitor!(monitors, worker, mref)
@@ -268,11 +266,11 @@ defmodule Verk.WorkersManager do
     notify!(%Events.JobFinished{job: job, started_at: start_time, finished_at: finished_at})
   end
 
-  defp fail(job, item_id, start_time, worker, mref, monitors, queue_manager_name, consumer_name, exception, stacktrace) do
+  defp fail(job, start_time, worker, mref, monitors, queue_manager_name, consumer_name, exception, stacktrace) do
     Log.fail(job, start_time, worker)
     demonitor!(monitors, worker, mref)
     :ok = QueueManager.retry(queue_manager_name, job, exception, stacktrace)
-    :ok = QueueManager.ack(queue_manager_name, item_id)
+    :ok = QueueManager.ack(queue_manager_name, job.item_id)
     QueueConsumer.ask(consumer_name, 1)
 
     notify!(%Events.JobFailed{
@@ -284,10 +282,10 @@ defmodule Verk.WorkersManager do
     })
   end
 
-  defp start_job(job, item_id, state) do
+  defp start_job(job, state) do
     case :poolboy.checkout(state.pool_name, false) do
       worker when is_pid(worker) ->
-        monitor!(state.monitors, worker, job, item_id)
+        monitor!(state.monitors, worker, job)
         Log.start(job, worker)
         Verk.Worker.perform_async(worker, self(), job)
         notify!(%Events.JobStarted{job: job, started_at: Time.now()})
@@ -299,10 +297,10 @@ defmodule Verk.WorkersManager do
     true = :ets.delete(monitors, worker)
   end
 
-  defp monitor!(monitors, worker, job = %Job{jid: job_id}, item_id) do
+  defp monitor!(monitors, worker, job = %Job{jid: job_id}) do
     mref = Process.monitor(worker)
     now = Time.now()
-    true = :ets.insert(monitors, {worker, job_id, job, mref, now, item_id})
+    true = :ets.insert(monitors, {worker, job_id, job, mref, now})
   end
 
   @doc false
@@ -313,9 +311,5 @@ defmodule Verk.WorkersManager do
 
   defp notify!(event) do
     :ok = Verk.EventProducer.async_notify(event)
-  end
-
-  defp random_timeout(timeout) do
-    round(timeout + :rand.uniform() * timeout)
   end
 end

@@ -6,11 +6,13 @@ defmodule Verk.SupervisorTest do
     Application.delete_env(:verk, :local_node_id)
     Application.delete_env(:verk, :generate_node_id)
     Application.put_env(:verk, :node_id, "123")
+    Application.put_env(:verk, :redis_pool_size, 3)
 
     on_exit(fn ->
       Application.delete_env(:verk, :node_id)
       Application.delete_env(:verk, :local_node_id)
       Application.delete_env(:verk, :generate_node_id)
+      Application.delete_env(:verk, :redis_pool_size)
     end)
 
     :ok
@@ -21,6 +23,7 @@ defmodule Verk.SupervisorTest do
       {:ok, {_, children}} = init([])
       [redix, producer, stats, schedule_manager, manager_sup, drainer] = children
 
+      IO.inspect redix
       assert {Verk.Redis, _, _, _, :worker, [Redix]} = redix
       assert {Verk.EventProducer, _, _, _, :worker, [Verk.EventProducer]} = producer
       assert {Verk.QueueStats, _, _, _, :worker, [Verk.QueueStats]} = stats

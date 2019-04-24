@@ -5,7 +5,6 @@ defmodule Verk.Node.Manager do
 
   use GenServer
   require Logger
-  alias Verk.InProgressQueue
 
   @doc false
   def start_link(_), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
@@ -22,7 +21,6 @@ defmodule Verk.Node.Manager do
     heartbeat(local_verk_node_id, frequency)
 
     Process.send_after(self(), :heartbeat, frequency)
-    Process.flag(:trap_exit, true)
     {:ok, {local_verk_node_id, frequency}}
   end
 
@@ -44,10 +42,5 @@ defmodule Verk.Node.Manager do
           "Failed to heartbeat node '#{local_verk_node_id}'. Reason: #{inspect(reason)}"
         )
     end
-  end
-
-  def terminate(reason, _state) do
-    Logger.warn("Node.Manager terminating. Reason: #{reason}")
-    :ok
   end
 end

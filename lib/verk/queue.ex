@@ -15,14 +15,6 @@ defmodule Verk.Queue do
     Redix.command(redis, ["XADD", queue_name(job.queue), "*", "job", encoded_job])
   end
 
-  def remove(queue, item_id, redis \\ Verk.Redis) do
-    Redix.pipeline(redis, [
-      ["XACK", queue_name(queue), "verk", item_id],
-      ["XDEL", queue_name(queue), item_id]
-    ])
-    |> IO.inspect()
-  end
-
   @doc """
   Counts how many jobs are enqueued
   """
@@ -97,19 +89,21 @@ defmodule Verk.Queue do
   @doc """
   Lists enqueued jobs from `start` to `stop`
   """
-  @spec range(binary, integer, integer) :: {:ok, [Verk.Job.T]} | {:error, Redix.Error.t()}
-  def range(queue, start \\ 0, stop \\ -1) do
-    case Redix.command(Verk.Redis, ["LRANGE", queue_name(queue), start, stop]) do
-      {:ok, jobs} -> {:ok, for(job <- jobs, do: Job.decode!(job))}
-      {:error, error} -> {:error, error}
+  @spec range(binary, binary, binary) :: {:ok, [Verk.Job.T]} | {:error, Redix.Error.t()}
+  def range(queue, start \\ "-", stop \\ "+") do
+    case Redix.command(Verk.Redis, ["XRANGE", queue_name(queue), start, stop]) do
+      {:ok, jobs} ->
+        {:ok, for([item_id, ["job", job]] <- jobs, do: Job.decode!(job, item_id))}
+      {:error, error} ->
+        {:error, error}
     end
   end
 
   @doc """
   Lists enqueued jobs from `start` to `stop`, raising if there's an error
   """
-  @spec range!(binary, integer, integer) :: [Verk.Job.T]
-  def range!(queue, start \\ 0, stop \\ -1) do
+  @spec range!(binary, binary, binary) :: [Verk.Job.T]
+  def range!(queue, start \\ "-", stop \\ "+") do
     bangify(range(queue, start, stop))
   end
 
@@ -121,18 +115,19 @@ defmodule Verk.Queue do
 
   An error tuple may be returned if Redis failed
   """
-  @spec delete_job(binary, %Job{} | binary) :: {:ok, boolean} | {:error, Redix.Error.t()}
-  def delete_job(queue, %Job{original_json: original_json}) do
-    delete_job(queue, original_json)
-  end
-
-  def delete_job(queue, original_json) do
-    case Redix.command(Verk.Redis, ["LREM", queue_name(queue), 1, original_json]) do
-      {:ok, 0} -> {:ok, false}
-      {:ok, 1} -> {:ok, true}
+  @spec delete_job(binary, Job.t | binary, GenServer.server) :: {:ok, boolean} | {:error, Redix.Error.t()}
+  def delete_job(queue, item_id, redis \\ Verk.Redis)
+  def delete_job(queue, item_id, redis) when is_binary(item_id) do
+    case Redix.pipeline(redis, [
+      ["XACK", queue_name(queue), "verk", item_id],
+      ["XDEL", queue_name(queue), item_id]
+    ]) do
+      {:ok, [_, 1]} -> {:ok, true}
+      {:ok, _} -> {:ok, false}
       {:error, error} -> {:error, error}
     end
   end
+  def delete_job(queue, job, redis), do: delete_job(queue, job.item_id, redis)
 
   @doc """
   Delete job from the `queue`, raising if there's an error
@@ -142,12 +137,8 @@ defmodule Verk.Queue do
 
   An error will be raised if Redis failed
   """
-  @spec delete_job!(binary, %Job{} | binary) :: boolean
-  def delete_job!(queue, %Job{original_json: original_json}) do
-    delete_job!(queue, original_json)
-  end
-
-  def delete_job!(queue, original_json) do
-    bangify(delete_job(queue, original_json))
+  @spec delete_job!(binary, Job.t | binary, GenServer.Sever) :: boolean
+  def delete_job!(queue, job, redis \\ Verk.Redis) do
+    bangify(delete_job(queue, job, redis))
   end
 end
