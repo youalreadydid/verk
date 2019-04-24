@@ -212,7 +212,7 @@ defmodule Verk.QueueManagerTest do
     test "ack job" do
       job_item_id = "item_id"
 
-      expect(Queue, :remove, fn "test_queue", ^job_item_id, :redis -> {:ok, [1, 1]} end)
+      expect(Queue, :delete_job, fn "test_queue", ^job_item_id, :redis -> {:ok, [1, 1]} end)
 
       state = "test_queue"
 
@@ -224,7 +224,7 @@ defmodule Verk.QueueManagerTest do
     test "malformed job" do
       job_item_id = "item_id"
 
-      expect(Queue, :remove, fn "test_queue", ^job_item_id, :redis -> {:ok, [1, 1]} end)
+      expect(Queue, :delete_job, fn "test_queue", ^job_item_id, :redis -> {:ok, [1, 1]} end)
 
       state = "test_queue"
 
