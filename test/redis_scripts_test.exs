@@ -15,9 +15,9 @@ defmodule RedisScriptsTest do
       other_job = "{\"jid\":\"456\",\"queue\":\"test_queue\"}"
       enqueued_job = "{\"jid\":\"789\",\"queue\":\"test_queue\"}"
 
-      {:ok, _} = Redix.command(redis, ~w(DEL retry queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL retry verk:queue:test_queue))
       {:ok, _} = Redix.command(redis, ~w(ZADD retry 42 #{job} 45 #{other_job}))
-      {:ok, _} = Redix.command(redis, ~w(LPUSH queue:test_queue #{enqueued_job}))
+      {:ok, _} = Redix.command(redis, ~w(XADD verk:queue:test_queue * job #{enqueued_job}))
 
       assert Redix.command(redis, ["EVAL", @enqueue_retriable_job_script, 1, "retry", "41"]) ==
                {:ok, nil}
@@ -28,14 +28,15 @@ defmodule RedisScriptsTest do
       assert Redix.command(redis, ~w(ZRANGEBYSCORE retry -inf +inf WITHSCORES)) ==
                {:ok, [other_job, "45"]}
 
-      assert Redix.command(redis, ~w(LRANGE queue:test_queue 0 -1)) == {:ok, [job, enqueued_job]}
+      assert [[_, ["job", ^enqueued_job]], [_, ["job", ^job]]] =
+               Redix.command!(redis, ~w(XRANGE verk:queue:test_queue - +))
     end
 
     test "enqueue job to queue form schedule set", %{redis: redis} do
       scheduled_job = "{\"jid\":\"123\",\"queue\":\"test_queue\"}"
       enqueued_scheduled_job = "{\"jid\":\"123\",\"enqueued_at\":42,\"queue\":\"test_queue\"}"
 
-      {:ok, _} = Redix.command(redis, ~w(DEL schedule queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL schedule verk:queue:test_queue))
       {:ok, _} = Redix.command(redis, ~w(ZADD schedule 42 #{scheduled_job}))
 
       assert Redix.command(redis, ["EVAL", @enqueue_retriable_job_script, 1, "schedule", "41"]) ==
@@ -43,13 +44,16 @@ defmodule RedisScriptsTest do
 
       assert Redix.command(redis, ["EVAL", @enqueue_retriable_job_script, 1, "schedule", "42"]) ==
                {:ok, enqueued_scheduled_job}
+
+      assert [[_, ["job", ^enqueued_scheduled_job]]] =
+               Redix.command!(redis, ~w(XRANGE verk:queue:test_queue - +))
     end
 
     test "enqueue job to queue form null enqueued_at key", %{redis: redis} do
       scheduled_job = "{\"jid\":\"123\",\"enqueued_at\":null,\"queue\":\"test_queue\"}"
       enqueued_scheduled_job = "{\"jid\":\"123\",\"enqueued_at\":42,\"queue\":\"test_queue\"}"
 
-      {:ok, _} = Redix.command(redis, ~w(DEL schedule queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL schedule verk:queue:test_queue))
       {:ok, _} = Redix.command(redis, ~w(ZADD schedule 42 #{scheduled_job}))
 
       assert Redix.command(redis, ["EVAL", @enqueue_retriable_job_script, 1, "schedule", "41"]) ==
@@ -57,13 +61,16 @@ defmodule RedisScriptsTest do
 
       assert Redix.command(redis, ["EVAL", @enqueue_retriable_job_script, 1, "schedule", "42"]) ==
                {:ok, enqueued_scheduled_job}
+
+      assert [[_, ["job", ^enqueued_scheduled_job]]] =
+               Redix.command!(redis, ~w(XRANGE verk:queue:test_queue - +))
     end
   end
 
   describe "requeue_job_now" do
     test "improper job format returns job data doesn't move job", %{redis: redis} do
       job_with_no_queue = "{\"jid\":\"123\"}"
-      {:ok, _} = Redix.command(redis, ~w(DEL retry queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL retry verk:queue:test_queue))
       {:ok, _} = Redix.command(redis, ~w(ZADD retry 42 #{job_with_no_queue}))
 
       assert Redix.command(redis, ["EVAL", @requeue_job_now_script, 1, "retry", job_with_no_queue]) ==
@@ -75,7 +82,7 @@ defmodule RedisScriptsTest do
 
     test "valid job format, requeue job moves from retry to original queue", %{redis: redis} do
       job = "{\"jid\":\"123\",\"queue\":\"test_queue\"}"
-      {:ok, _} = Redix.command(redis, ~w(DEL retry queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL retry verk:queue:test_queue))
       {:ok, _} = Redix.command(redis, ~w(ZADD retry 42 #{job}))
 
       assert Redix.command(redis, ~w(ZRANGEBYSCORE retry -inf +inf WITHSCORES)) ==
@@ -85,11 +92,13 @@ defmodule RedisScriptsTest do
                {:ok, job}
 
       assert Redix.command(redis, ~w(ZRANGEBYSCORE retry -inf +inf WITHSCORES)) == {:ok, []}
+
+      assert [[_, ["job", ^job]]] = Redix.command!(redis, ~w(XRANGE verk:queue:test_queue - +))
     end
 
     test "valid job format, empty original queue job is still requeued", %{redis: redis} do
       job = "{\"jid\":\"123\",\"queue\":\"test_queue\"}"
-      {:ok, _} = Redix.command(redis, ~w(DEL retry queue:test_queue))
+      {:ok, _} = Redix.command(redis, ~w(DEL retry verk:queue:test_queue))
 
       assert Redix.command(redis, ~w(ZRANGEBYSCORE retry -inf +inf WITHSCORES)) == {:ok, []}
 
@@ -97,6 +106,8 @@ defmodule RedisScriptsTest do
                {:ok, job}
 
       assert Redix.command(redis, ~w(ZRANGEBYSCORE retry -inf +inf WITHSCORES)) == {:ok, []}
+
+      assert [[_, ["job", ^job]]] = Redix.command!(redis, ~w(XRANGE verk:queue:test_queue - +))
     end
   end
 end

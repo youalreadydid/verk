@@ -25,25 +25,39 @@ defmodule Verk.QueueTest do
   defp ensure_group_exists!(queue, redis) do
     Redix.command!(redis, ["XGROUP", "CREATE", queue_name(queue), "verk", 0, "MKSTREAM"])
   rescue
-      _ -> :ok
+    _ -> :ok
   end
 
   defp add_jobs!(queue, amount) do
-    for i <- (1..amount) do
+    for i <- 1..amount do
       Redix.command!(Verk.Redis, ~w(XADD #{queue_name(queue)} * job job#{i}))
     end
   end
 
   describe "enqueue/2" do
-    #FIXME
+    test "add job to the queue" do
+      job = %Job{queue: @queue}
+      encoded_job = Job.encode!(job)
+      assert {:ok, item_id} = enqueue(job)
+
+      assert [[^item_id, ["job", ^encoded_job]]] =
+               Redix.command!(Verk.Redis, ["XRANGE", @queue_key, "-", "+"])
+    end
   end
 
-  describe "pending/1" do
-    #FIXME
+  describe "enqueue!/2" do
+    test "add job to the queue" do
+      job = %Job{queue: @queue}
+      encoded_job = Job.encode!(job)
+      assert item_id = enqueue!(job)
+
+      assert [[^item_id, ["job", ^encoded_job]]] =
+               Redix.command!(Verk.Redis, ["XRANGE", @queue_key, "-", "+"])
+    end
   end
 
-  describe "pending!/1" do
-    #FIXME
+  describe "count_pending/1" do
+    # FIXME
   end
 
   describe "count/1" do
@@ -143,7 +157,7 @@ defmodule Verk.QueueTest do
     end
 
     test "item_id" do
-      json = %Job{class: "Class", args: []} |> Job.encode!
+      json = %Job{class: "Class", args: []} |> Job.encode!()
 
       item_id = Redix.command!(Verk.Redis, ~w(XADD #{@queue_key} * job #{json}))
 
@@ -169,7 +183,7 @@ defmodule Verk.QueueTest do
     end
 
     test "item_id" do
-      json = %Job{class: "Class", args: []} |> Job.encode!
+      json = %Job{class: "Class", args: []} |> Job.encode!()
 
       item_id = Redix.command!(Verk.Redis, ~w(XADD #{@queue_key} * job #{json}))
 

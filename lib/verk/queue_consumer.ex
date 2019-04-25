@@ -116,24 +116,6 @@ defmodule Verk.QueueConsumer do
 
   defp consume(state) do
     Logger.info("Consuming. Demand: #{state.demand}. Last id: #{state.last_id}")
-
-    commands = [
-      "XREADGROUP",
-      "GROUP",
-      "verk",
-      state.node_id,
-      "COUNT",
-      min(@max_jobs, state.demand),
-      "BLOCK",
-      @max_timeout,
-      "STREAMS",
-      Queue.queue_name(state.queue),
-      state.last_id
-    ]
-
-    case Redix.command(state.redis, commands, timeout: @max_timeout + 5000) do
-      {:ok, [[_, jobs]]} -> {:ok, jobs}
-      result -> result |> IO.inspect
-    end
+    Queue.consume(state.queue, state.node_id, state.last_id, min(state.demand, @max_jobs), @max_timeout, state.redis)
   end
 end
