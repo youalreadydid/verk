@@ -49,15 +49,64 @@ defmodule Verk.QueueTest do
     test "add job to the queue" do
       job = %Job{queue: @queue}
       encoded_job = Job.encode!(job)
-      assert item_id = enqueue!(job)
+      item_id = enqueue!(job)
 
       assert [[^item_id, ["job", ^encoded_job]]] =
                Redix.command!(Verk.Redis, ["XRANGE", @queue_key, "-", "+"])
     end
   end
 
+  describe "consume/6" do
+    test "consume jobs from the queue" do
+      job = %Job{queue: @queue}
+      encoded_job = Job.encode!(job)
+      item_id = enqueue!(job)
+      {:ok, jobs} = consume(@queue, "test-123", ">", 5)
+      assert jobs == [[item_id, ["job", encoded_job]]]
+
+      pending =
+        Redix.command!(Verk.Redis, ["XPENDING", @queue_key, "verk", "-", "+", 5, "test-123"])
+
+      assert [[^item_id, "test-123", _, _]] = pending
+    end
+  end
+
   describe "count_pending/1" do
-    # FIXME
+    test "empty queue" do
+      assert count_pending(@queue) == {:ok, 0}
+    end
+
+    test "non-empty queue" do
+      add_jobs!(@queue, 3)
+
+      assert count_pending(@queue) == {:ok, 0}
+    end
+
+    test "non-empty queue consuming jobs" do
+      add_jobs!(@queue, 3)
+      {:ok, _jobs} = consume(@queue, "test-123", ">", 2)
+
+      assert count_pending(@queue) == {:ok, 2}
+    end
+  end
+
+  describe "count_pending!/1" do
+    test "empty queue" do
+      assert count_pending!(@queue) == 0
+    end
+
+    test "non-empty queue" do
+      add_jobs!(@queue, 3)
+
+      assert count_pending!(@queue) == 0
+    end
+
+    test "non-empty queue consuming jobs" do
+      add_jobs!(@queue, 3)
+      {:ok, _jobs} = consume(@queue, "test-123", ">", 2)
+
+      assert count_pending!(@queue) == 2
+    end
   end
 
   describe "count/1" do
