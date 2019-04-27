@@ -23,7 +23,7 @@ defmodule Verk.SupervisorTest do
       {:ok, {_, children}} = init([])
       [redix, producer, stats, schedule_manager, manager_sup, drainer] = children
 
-      IO.inspect redix
+      IO.inspect(redix)
       assert {Verk.Redis, _, _, _, :worker, [Redix]} = redix
       assert {Verk.EventProducer, _, _, _, :worker, [Verk.EventProducer]} = producer
       assert {Verk.QueueStats, _, _, _, :worker, [Verk.QueueStats]} = stats

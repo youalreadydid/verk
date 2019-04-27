@@ -23,13 +23,13 @@ defmodule Verk.QueueConsumer do
     String.to_atom("#{queue}.queue_consumer")
   end
 
-  def ask(queue_consumer_name, n) do
-    GenServer.cast(queue_consumer_name, {:ask, n})
+  def ask(queue_consumer, n) do
+    GenServer.cast(queue_consumer, {:ask, n})
   end
 
   @doc false
-  def start_link(queue_consumer_name, queue_name) do
-    GenServer.start_link(__MODULE__, [queue_name], name: queue_consumer_name)
+  def start_link(queue_name) do
+    GenServer.start_link(__MODULE__, [queue_name])
   end
 
   def init([queue]) do
@@ -54,7 +54,7 @@ defmodule Verk.QueueConsumer do
   defp ensure_group_exists!(queue, redis) do
     Redix.command(redis, ["XGROUP", "CREATE", Queue.queue_name(queue), "verk", 0, "MKSTREAM"])
   rescue
-      _ -> :ok
+    _ -> :ok
   end
 
   def handle_cast({:ask, new_demand}, state) do
@@ -116,6 +116,14 @@ defmodule Verk.QueueConsumer do
 
   defp consume(state) do
     Logger.info("Consuming. Demand: #{state.demand}. Last id: #{state.last_id}")
-    Queue.consume(state.queue, state.node_id, state.last_id, min(state.demand, @max_jobs), @max_timeout, state.redis)
+
+    Queue.consume(
+      state.queue,
+      state.node_id,
+      state.last_id,
+      min(state.demand, @max_jobs),
+      @max_timeout,
+      state.redis
+    )
   end
 end

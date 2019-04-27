@@ -2,7 +2,7 @@ defmodule Verk.WorkersManagerTest do
   use ExUnit.Case, async: true
   import Mimic
   import Verk.WorkersManager
-  alias Verk.{WorkersManager.State}
+  alias Verk.{WorkersManager.State, Job, QueueConsumer, QueueManager}
 
   setup :verify_on_exit!
 
@@ -27,6 +27,8 @@ defmodule Verk.WorkersManagerTest do
   setup do
     pid = self()
     {:ok, _} = GenStage.start_link(Repeater, pid)
+    stub(QueueConsumer)
+    stub(:poolboy)
     table = :ets.new(:"queue_name.workers_manager", [:named_table, read_concurrency: true])
     {:ok, monitors: table}
   end
@@ -96,13 +98,15 @@ defmodule Verk.WorkersManagerTest do
       name = :workers_manager
       queue_name = "queue_name"
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       pool_name = "pool_name"
-      pool_size = "size"
+      pool_size = 25
       timeout = Confex.get_env(:verk, :workers_manager_timeout)
 
       state = %State{
         queue_name: queue_name,
         queue_manager_name: queue_manager_name,
+        consumer: consumer,
         pool_name: pool_name,
         pool_size: pool_size,
         monitors: :workers_manager,
@@ -111,24 +115,27 @@ defmodule Verk.WorkersManagerTest do
       }
 
       expect(Verk.Manager, :status, fn ^queue_name -> :running end)
+      expect(QueueConsumer, :start_link, fn ^queue_name -> {:ok, consumer} end)
+      expect(QueueConsumer, :ask, fn ^consumer, ^pool_size -> :ok end)
 
       assert init([name, queue_name, queue_manager_name, pool_name, pool_size]) == {:ok, state}
 
-      assert_received :enqueue_inprogress
       assert_receive %Verk.Events.QueueRunning{queue: ^queue_name}
     end
 
-    test "inits and does not notify ir paused" do
+    test "inits and does not notify if paused" do
       name = :workers_manager
       queue_name = "queue_name"
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       pool_name = "pool_name"
-      pool_size = "size"
+      pool_size = 25
       timeout = Confex.get_env(:verk, :workers_manager_timeout)
 
       state = %State{
         queue_name: queue_name,
         queue_manager_name: queue_manager_name,
+        consumer: consumer,
         pool_name: pool_name,
         pool_size: pool_size,
         monitors: :workers_manager,
@@ -137,10 +144,10 @@ defmodule Verk.WorkersManagerTest do
       }
 
       expect(Verk.Manager, :status, fn ^queue_name -> :paused end)
+      expect(QueueConsumer, :start_link, fn ^queue_name -> {:ok, consumer} end)
+      expect(QueueConsumer, :ask, fn ^consumer, ^pool_size -> :ok end)
 
       assert init([name, queue_name, queue_manager_name, pool_name, pool_size]) == {:ok, state}
-
-      assert_received :enqueue_inprogress
     end
   end
 
@@ -149,7 +156,7 @@ defmodule Verk.WorkersManagerTest do
       queue_name = "queue_name"
       state = %State{status: :running, queue_name: queue_name}
 
-      assert handle_call(:pause, :from, state) == {:reply, :ok, %{state | status: :pausing}, 0}
+      assert handle_call(:pause, :from, state) == {:reply, :ok, %{state | status: :pausing}}
       assert_receive %Verk.Events.QueuePausing{queue: ^queue_name}
     end
 
@@ -180,7 +187,7 @@ defmodule Verk.WorkersManagerTest do
       queue_name = "queue_name"
       state = %State{status: :pausing, queue_name: queue_name}
 
-      assert handle_call(:resume, :from, state) == {:reply, :ok, %{state | status: :running}, 0}
+      assert handle_call(:resume, :from, state) == {:reply, :ok, %{state | status: :running}}
       assert_receive %Verk.Events.QueueRunning{queue: ^queue_name}
     end
 
@@ -188,8 +195,58 @@ defmodule Verk.WorkersManagerTest do
       queue_name = "queue_name"
       state = %State{status: :paused, queue_name: queue_name}
 
-      assert handle_call(:resume, :from, state) == {:reply, :ok, %{state | status: :running}, 0}
+      assert handle_call(:resume, :from, state) == {:reply, :ok, %{state | status: :running}}
       assert_receive %Verk.Events.QueueRunning{queue: ^queue_name}
+    end
+  end
+
+  describe "handle_info/2 jobs" do
+    test "valid jobs", %{monitors: monitors} do
+      pool_name = "pool_name"
+      item_id = "item_id"
+      job_id = "job_id"
+      job = %Job{jid: job_id}
+      encoded_job = job |> Job.encode!()
+      job_with_item_id = %{job | original_json: encoded_job, item_id: item_id}
+      queue_manager_name = "queue_manager_name"
+      consumer = :consumer
+
+      state = %State{
+        monitors: monitors,
+        pool_name: pool_name,
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
+      }
+
+      worker = self()
+
+      expect(:poolboy, :checkout, fn ^pool_name, false -> worker end)
+      expect(Verk.Worker, :perform_async, fn ^worker, ^worker, ^job_with_item_id -> :ok end)
+
+      assert handle_info({:jobs, [[item_id, ["job", encoded_job]]]}, state) == {:noreply, state}
+
+      assert match?([{^worker, ^job_id, ^job_with_item_id, _, _}], :ets.lookup(monitors, worker))
+
+      assert_receive %Verk.Events.JobStarted{job: ^job_with_item_id, started_at: _}
+    end
+
+    test "malformed jobs", %{monitors: monitors} do
+      pool_name = "pool_name"
+      item_id = "item_id"
+      queue_manager_name = "queue_manager_name"
+      consumer = :consumer
+
+      state = %State{
+        monitors: monitors,
+        pool_name: pool_name,
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
+      }
+
+      expect(QueueManager, :malformed, fn ^queue_manager_name, ^item_id -> :ok end)
+
+      assert handle_info({:jobs, [[item_id, ["job", "invalid_json"]]]}, state) ==
+               {:noreply, state}
     end
   end
 
@@ -198,8 +255,10 @@ defmodule Verk.WorkersManagerTest do
       ref = make_ref()
       worker = self()
       pool_name = "pool_name"
-      job = "job"
+      item_id = "item_id"
+      job = %Job{item_id: item_id}
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       reason = :reason
       exception = RuntimeError.exception(inspect(reason))
 
@@ -208,7 +267,8 @@ defmodule Verk.WorkersManagerTest do
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
       }
 
       expect(Verk.Log, :fail, fn ^job, "start_time", ^worker -> :ok end)
@@ -217,11 +277,12 @@ defmodule Verk.WorkersManagerTest do
         :ok
       end)
 
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
       expect(:poolboy, :checkin, fn ^pool_name, ^worker -> :ok end)
 
       assert handle_info({:DOWN, ref, :_, worker, {reason, :stacktrace}}, state) ==
-               {:noreply, state, 0}
+               {:noreply, state}
 
       assert :ets.lookup(monitors, worker) == []
 
@@ -237,8 +298,10 @@ defmodule Verk.WorkersManagerTest do
       ref = make_ref()
       worker = self()
       pool_name = "pool_name"
-      job = "job"
+      item_id = "item_id"
+      job = %Job{item_id: item_id}
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       reason = :reason
       exception = RuntimeError.exception(inspect(reason))
 
@@ -247,15 +310,17 @@ defmodule Verk.WorkersManagerTest do
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
       }
 
       expect(Verk.Log, :fail, fn ^job, "start_time", ^worker -> :ok end)
       expect(Verk.QueueManager, :retry, fn ^queue_manager_name, ^job, ^exception, [] -> :ok end)
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
       expect(:poolboy, :checkin, fn ^pool_name, ^worker -> :ok end)
 
-      assert handle_info({:DOWN, ref, :_, worker, reason}, state) == {:noreply, state, 0}
+      assert handle_info({:DOWN, ref, :_, worker, reason}, state) == {:noreply, state}
 
       assert :ets.lookup(monitors, worker) == []
 
@@ -269,27 +334,31 @@ defmodule Verk.WorkersManagerTest do
 
     test "DOWN coming from dead worker with normal reason", %{monitors: monitors} do
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       pool_name = "pool_name"
 
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: :consumer
       }
 
       worker = self()
       start_time = DateTime.utc_now()
       now = DateTime.utc_now()
-      job = %Verk.Job{}
-      finished_job = %Verk.Job{finished_at: now}
+      item_id = "item_id"
+      job = %Verk.Job{item_id: item_id}
+      finished_job = %{job | finished_at: now}
       job_id = "job_id"
       ref = make_ref()
 
       stub(Verk.Time, :now, fn -> now end)
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
 
       :ets.insert(monitors, {worker, job_id, job, ref, start_time})
-      assert handle_info({:DOWN, ref, :_, worker, :normal}, state) == {:noreply, state, 0}
+      assert handle_info({:DOWN, ref, :_, worker, :normal}, state) == {:noreply, state}
 
       assert :ets.lookup(state.monitors, worker) == []
 
@@ -304,9 +373,11 @@ defmodule Verk.WorkersManagerTest do
       ref = make_ref()
       worker = self()
       pool_name = "pool_name"
-      job = "job"
+      item_id = "item_id"
+      job = %Verk.Job{item_id: item_id}
       job_id = "job_id"
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       exception = RuntimeError.exception(":failed")
 
       :ets.insert(monitors, {worker, job_id, job, ref, "start_time"})
@@ -314,15 +385,17 @@ defmodule Verk.WorkersManagerTest do
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: :consumer
       }
 
       expect(Verk.Log, :fail, fn ^job, "start_time", ^worker -> :ok end)
       expect(Verk.QueueManager, :retry, fn ^queue_manager_name, ^job, ^exception, [] -> :ok end)
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
       expect(:poolboy, :checkin, fn ^pool_name, ^worker -> :ok end)
 
-      assert handle_info({:DOWN, ref, :_, worker, :failed}, state) == {:noreply, state, 0}
+      assert handle_info({:DOWN, ref, :_, worker, :failed}, state) == {:noreply, state}
 
       assert :ets.lookup(monitors, worker) == []
 
@@ -339,25 +412,29 @@ defmodule Verk.WorkersManagerTest do
     test "done having the worker registered", %{monitors: monitors} do
       queue_manager_name = "queue_manager_name"
       pool_name = "pool_name"
+      consumer = :consumer
 
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
       }
 
       worker = self()
       now = DateTime.utc_now()
-      job = %Verk.Job{}
-      finished_job = %Verk.Job{finished_at: now}
+      item_id = "item_id"
+      job = %Verk.Job{item_id: item_id}
+      finished_job = %{job | finished_at: now}
       job_id = "job_id"
 
       stub(Verk.Time, :now, fn -> now end)
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
       expect(:poolboy, :checkin, fn ^pool_name, ^worker -> :ok end)
 
       :ets.insert(monitors, {worker, job_id, job, make_ref(), now})
-      assert handle_cast({:done, worker, job_id}, state) == {:noreply, state, 0}
+      assert handle_cast({:done, worker, job_id}, state) == {:noreply, state}
 
       assert :ets.lookup(state.monitors, worker) == []
       assert_receive %Verk.Events.JobFinished{job: ^finished_job, finished_at: ^now}
@@ -367,9 +444,11 @@ defmodule Verk.WorkersManagerTest do
       ref = make_ref()
       worker = self()
       pool_name = "pool_name"
-      job = "job"
+      item_id = "item_id"
+      job = %Job{item_id: item_id}
       job_id = "job_id"
       queue_manager_name = "queue_manager_name"
+      consumer = :consumer
       exception = RuntimeError.exception("reasons")
 
       :ets.insert(monitors, {worker, job_id, job, ref, "start_time"})
@@ -377,7 +456,8 @@ defmodule Verk.WorkersManagerTest do
       state = %State{
         monitors: monitors,
         pool_name: pool_name,
-        queue_manager_name: queue_manager_name
+        queue_manager_name: queue_manager_name,
+        consumer: consumer
       }
 
       expect(Verk.Log, :fail, fn ^job, "start_time", ^worker -> :ok end)
@@ -386,11 +466,12 @@ defmodule Verk.WorkersManagerTest do
         :ok
       end)
 
-      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^job -> :ok end)
+      expect(Verk.QueueManager, :ack, fn ^queue_manager_name, ^item_id -> :ok end)
+      expect(QueueConsumer, :ask, fn ^consumer, 1 -> :ok end)
       expect(:poolboy, :checkin, fn ^pool_name, ^worker -> :ok end)
 
       assert handle_cast({:failed, worker, job_id, exception, :stacktrace}, state) ==
-               {:noreply, state, 0}
+               {:noreply, state}
 
       assert :ets.lookup(monitors, worker) == []
 

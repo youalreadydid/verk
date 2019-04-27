@@ -5,6 +5,7 @@ defmodule Verk.Redis do
 
   def child_spec(_) do
     redis_url = Confex.fetch_env!(:verk, :redis_url)
+
     children =
       0..pool_size()
       |> Enum.map(fn i ->
@@ -12,7 +13,11 @@ defmodule Verk.Redis do
       end)
 
     verk_redis_main = Supervisor.child_spec({Redix, [redis_url, [name: Verk.Redis]]}, id: Redix)
-    Supervisor.Spec.supervisor(Supervisor, [[verk_redis_main | children], [strategy: :one_for_one]])
+
+    Supervisor.Spec.supervisor(Supervisor, [
+      [verk_redis_main | children],
+      [strategy: :one_for_one]
+    ])
   end
 
   def random() do

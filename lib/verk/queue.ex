@@ -30,7 +30,7 @@ defmodule Verk.Queue do
   @doc """
   Consume max of `count` jobs from `queue` identifying as `consumer_id`
   """
-  @spec consume(binary, binary, binary, pos_integer, pos_integer, GenServer.server) :: list
+  @spec consume(binary, binary, binary, pos_integer, pos_integer, GenServer.server()) :: list
   def consume(queue, consumer_id, last_id, count, timeout \\ 30_000, redis \\ Verk.Redis) do
     command = [
       "XREADGROUP",

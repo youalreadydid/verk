@@ -16,7 +16,7 @@ defmodule Verk.WorkersManager do
     defstruct queue_name: nil,
               pool_name: nil,
               queue_manager_name: nil,
-              consumer_name: nil,
+              consumer: nil,
               pool_size: nil,
               monitors: nil,
               timeout: nil,
@@ -99,13 +99,12 @@ defmodule Verk.WorkersManager do
     timeout = Confex.get_env(:verk, :workers_manager_timeout, @default_timeout)
     status = Verk.Manager.status(queue_name)
 
-    consumer_name = QueueConsumer.name(queue_name)
-    {:ok, _pid} = QueueConsumer.start_link(consumer_name, queue_name)
+    {:ok, consumer} = QueueConsumer.start_link(queue_name)
 
     state = %State{
       queue_name: queue_name,
       queue_manager_name: queue_manager_name,
-      consumer_name: consumer_name,
+      consumer: consumer,
       pool_name: pool_name,
       pool_size: size,
       monitors: monitors,
@@ -117,7 +116,7 @@ defmodule Verk.WorkersManager do
 
     if status == :running, do: notify!(%Events.QueueRunning{queue: queue_name})
 
-    QueueConsumer.ask(consumer_name, size)
+    QueueConsumer.ask(consumer, size)
 
     {:ok, state}
   end
@@ -152,7 +151,7 @@ defmodule Verk.WorkersManager do
             "Failed to decode job, error: #{inspect(error)}, original job: #{inspect(job)}"
           )
 
-          QueueManager.malformed(state.queue_manager_name, job)
+          QueueManager.malformed(state.queue_manager_name, item_id)
       end
     end)
 
@@ -167,7 +166,15 @@ defmodule Verk.WorkersManager do
   def handle_info({:DOWN, mref, _, worker, :normal}, state) do
     case :ets.lookup(state.monitors, worker) do
       [{^worker, _job_id, job, ^mref, start_time}] ->
-        succeed(job, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
+        succeed(
+          job,
+          start_time,
+          worker,
+          mref,
+          state.monitors,
+          state.queue_manager_name,
+          state.consumer
+        )
 
       _ ->
         Logger.warn("Worker finished but such worker was not monitored #{inspect(worker)}")
@@ -206,7 +213,7 @@ defmodule Verk.WorkersManager do
           mref,
           state.monitors,
           state.queue_manager_name,
-          state.consumer_name,
+          state.consumer,
           exception,
           stack
         )
@@ -222,7 +229,15 @@ defmodule Verk.WorkersManager do
 
     case :ets.lookup(state.monitors, worker) do
       [{^worker, ^job_id, job, mref, start_time}] ->
-        succeed(job, start_time, worker, mref, state.monitors, state.queue_manager_name, state.consumer_name)
+        succeed(
+          job,
+          start_time,
+          worker,
+          mref,
+          state.monitors,
+          state.queue_manager_name,
+          state.consumer
+        )
 
       _ ->
         Logger.warn("#{job_id} finished but no worker was monitored")
@@ -244,7 +259,7 @@ defmodule Verk.WorkersManager do
           mref,
           state.monitors,
           state.queue_manager_name,
-          state.consumer_name,
+          state.consumer,
           exception,
           stacktrace
         )
@@ -256,9 +271,9 @@ defmodule Verk.WorkersManager do
     {:noreply, state}
   end
 
-  defp succeed(job, start_time, worker, mref, monitors, queue_manager_name, consumer_name) do
+  defp succeed(job, start_time, worker, mref, monitors, queue_manager_name, consumer) do
     QueueManager.ack(queue_manager_name, job.item_id)
-    QueueConsumer.ask(consumer_name, 1)
+    QueueConsumer.ask(consumer, 1)
     Log.done(job, start_time, worker)
     demonitor!(monitors, worker, mref)
     finished_at = Time.now()
@@ -266,12 +281,22 @@ defmodule Verk.WorkersManager do
     notify!(%Events.JobFinished{job: job, started_at: start_time, finished_at: finished_at})
   end
 
-  defp fail(job, start_time, worker, mref, monitors, queue_manager_name, consumer_name, exception, stacktrace) do
+  defp fail(
+         job,
+         start_time,
+         worker,
+         mref,
+         monitors,
+         queue_manager_name,
+         consumer,
+         exception,
+         stacktrace
+       ) do
     Log.fail(job, start_time, worker)
     demonitor!(monitors, worker, mref)
     :ok = QueueManager.retry(queue_manager_name, job, exception, stacktrace)
     :ok = QueueManager.ack(queue_manager_name, job.item_id)
-    QueueConsumer.ask(consumer_name, 1)
+    QueueConsumer.ask(consumer, 1)
 
     notify!(%Events.JobFailed{
       job: job,

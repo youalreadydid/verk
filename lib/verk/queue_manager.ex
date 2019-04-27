@@ -35,15 +35,15 @@ defmodule Verk.QueueManager do
   @doc """
   Acknowledge that a job was processed
   """
-  def ack(queue_manager, job) do
-    GenServer.cast(queue_manager, {:ack, job})
+  def ack(queue_manager, item_id) do
+    GenServer.cast(queue_manager, {:ack, item_id})
   end
 
   @doc """
   Remove a malformed job from the inprogress queue
   """
-  def malformed(queue_manager, job) do
-    GenServer.cast(queue_manager, {:malformed, job})
+  def malformed(queue_manager, item_id) do
+    GenServer.cast(queue_manager, {:malformed, item_id})
   end
 
   @doc false
