@@ -99,7 +99,7 @@ defmodule Verk.WorkersManager do
     timeout = Confex.get_env(:verk, :workers_manager_timeout, @default_timeout)
     status = Verk.Manager.status(queue_name)
 
-    {:ok, consumer} = QueueConsumer.start_link(queue_name)
+    {:ok, consumer} = QueueConsumer.start_link(queue_name, self())
 
     state = %State{
       queue_name: queue_name,

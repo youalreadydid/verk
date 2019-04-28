@@ -101,6 +101,7 @@ defmodule Verk.WorkersManagerTest do
       consumer = :consumer
       pool_name = "pool_name"
       pool_size = 25
+      workers_manager = self()
       timeout = Confex.get_env(:verk, :workers_manager_timeout)
 
       state = %State{
@@ -115,7 +116,7 @@ defmodule Verk.WorkersManagerTest do
       }
 
       expect(Verk.Manager, :status, fn ^queue_name -> :running end)
-      expect(QueueConsumer, :start_link, fn ^queue_name -> {:ok, consumer} end)
+      expect(QueueConsumer, :start_link, fn ^queue_name, ^workers_manager -> {:ok, consumer} end)
       expect(QueueConsumer, :ask, fn ^consumer, ^pool_size -> :ok end)
 
       assert init([name, queue_name, queue_manager_name, pool_name, pool_size]) == {:ok, state}
@@ -130,6 +131,7 @@ defmodule Verk.WorkersManagerTest do
       consumer = :consumer
       pool_name = "pool_name"
       pool_size = 25
+      workers_manager = self()
       timeout = Confex.get_env(:verk, :workers_manager_timeout)
 
       state = %State{
@@ -144,7 +146,7 @@ defmodule Verk.WorkersManagerTest do
       }
 
       expect(Verk.Manager, :status, fn ^queue_name -> :paused end)
-      expect(QueueConsumer, :start_link, fn ^queue_name -> {:ok, consumer} end)
+      expect(QueueConsumer, :start_link, fn ^queue_name, ^workers_manager -> {:ok, consumer} end)
       expect(QueueConsumer, :ask, fn ^consumer, ^pool_size -> :ok end)
 
       assert init([name, queue_name, queue_manager_name, pool_name, pool_size]) == {:ok, state}

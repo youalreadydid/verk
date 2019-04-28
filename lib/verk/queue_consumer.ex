@@ -5,22 +5,14 @@ defmodule Verk.QueueConsumer do
 
   use GenServer
   require Logger
-  alias Verk.{Queue, WorkersManager}
+  alias Verk.Queue
 
   @max_jobs 100
   @max_timeout 30_000
 
   defmodule State do
     @moduledoc false
-    defstruct [:queue, :workers_manager_name, :redis, :node_id, :demand, :last_id]
-  end
-
-  @doc """
-  Returns the atom that represents the QueueConsumer of the `queue`
-  """
-  @spec name(binary | atom) :: atom
-  def name(queue) do
-    String.to_atom("#{queue}.queue_consumer")
+    defstruct [:queue, :workers_manager, :redis, :node_id, :demand, :last_id]
   end
 
   def ask(queue_consumer, n) do
@@ -28,17 +20,17 @@ defmodule Verk.QueueConsumer do
   end
 
   @doc false
-  def start_link(queue_name) do
-    GenServer.start_link(__MODULE__, [queue_name])
+  def start_link(queue_name, workers_manager) do
+    GenServer.start_link(__MODULE__, [queue_name, workers_manager])
   end
 
-  def init([queue]) do
+  def init([queue, workers_manager]) do
     node_id = Confex.fetch_env!(:verk, :local_node_id)
     {:ok, redis} = Redix.start_link(Confex.get_env(:verk, :redis_url))
 
     state = %State{
       queue: queue,
-      workers_manager_name: WorkersManager.name(queue),
+      workers_manager: workers_manager,
       redis: redis,
       node_id: node_id,
       demand: 0,
@@ -58,7 +50,6 @@ defmodule Verk.QueueConsumer do
   end
 
   def handle_cast({:ask, new_demand}, state) do
-    IO.puts("Demand received: #{new_demand}. Current demand: #{state.demand}")
     if state.demand == 0, do: send(self(), :consume)
     {:noreply, %{state | demand: state.demand + new_demand}}
   end
@@ -70,19 +61,16 @@ defmodule Verk.QueueConsumer do
         {:noreply, state}
 
       {:ok, jobs} ->
-        IO.puts("Items consumed. Size: #{length(jobs)}")
+        send(state.workers_manager, {:jobs, jobs})
 
-        send(state.workers_manager_name, {:jobs, jobs})
-
-        new_demand = state.demand - Enum.count(jobs)
+        new_demand = state.demand - length(jobs)
         if new_demand > 0, do: send(self(), :consume)
         {:noreply, %{state | demand: new_demand}}
 
       result ->
-        IO.inspect(result)
-        IO.puts("Nothing consumed")
+        Logger.error("Error while consuming jobs. Result: #{inspect(result)}")
         send(self(), :consume)
-        {:noreply, [], state}
+        {:noreply, state}
     end
   end
 
@@ -97,9 +85,7 @@ defmodule Verk.QueueConsumer do
         {:noreply, %{state | last_id: ">"}}
 
       {:ok, jobs} ->
-        IO.puts("Items consumed. Size: #{length(jobs)}")
-
-        send(state.workers_manager_name, {:jobs, jobs})
+        send(state.workers_manager, {:jobs, jobs})
 
         [last_id, _] = List.last(jobs)
 
@@ -108,9 +94,9 @@ defmodule Verk.QueueConsumer do
         {:noreply, %{state | last_id: last_id, demand: new_demand}}
 
       result ->
-        IO.puts("Nothing consumed. Result: #{inspect(result)}")
+        Logger.error("Error while consuming jobs. Result: #{inspect(result)}")
         send(self(), :consume)
-        {:noreply, [], state}
+        {:noreply, state}
     end
   end
 
