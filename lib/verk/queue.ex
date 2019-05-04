@@ -30,7 +30,8 @@ defmodule Verk.Queue do
   @doc """
   Consume max of `count` jobs from `queue` identifying as `consumer_id`
   """
-  @spec consume(binary, binary, binary, pos_integer, pos_integer, GenServer.server()) :: list
+  @spec consume(binary, binary, binary, pos_integer, pos_integer, GenServer.server()) ::
+          {:ok, term} | {:error, Redix.Error.t()}
   def consume(queue, consumer_id, last_id, count, timeout \\ 30_000, redis \\ Verk.Redis) do
     command = [
       "XREADGROUP",
@@ -49,6 +50,17 @@ defmodule Verk.Queue do
     case Redix.command(redis, command, timeout: timeout + 5000) do
       {:ok, [[_, jobs]]} -> {:ok, jobs}
       result -> result
+    end
+  end
+
+  @doc """
+  List node ids that have pending jobs
+  """
+  def pending_node_ids(queue, redis \\ Verk.Redis) do
+    case Redix.command(redis, ["XPENDING", queue_name(queue), "verk"]) do
+      {:ok, [_, _, _, nil]} -> {:ok, []}
+      {:ok, [_, _, _, nodes]} -> {:ok, Enum.map(nodes, &(List.first(&1)))}
+      {:error, reason} -> {:error, reason}
     end
   end
 

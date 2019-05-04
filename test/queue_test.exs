@@ -71,6 +71,25 @@ defmodule Verk.QueueTest do
     end
   end
 
+  describe "pending/1" do
+    test "empty queue" do
+      assert pending_node_ids(@queue) == {:ok, []}
+    end
+
+    test "non-empty queue" do
+      add_jobs!(@queue, 3)
+
+      assert pending_node_ids(@queue) == {:ok, []}
+    end
+
+    test "non-empty queue consuming jobs" do
+      add_jobs!(@queue, 3)
+      {:ok, _jobs} = consume(@queue, "test-123", ">", 2)
+
+      assert pending_node_ids(@queue) == {:ok, ["test-123"]}
+    end
+  end
+
   describe "count_pending/1" do
     test "empty queue" do
       assert count_pending(@queue) == {:ok, 0}
